@@ -1,0 +1,319 @@
+package org.metalib.papifly.fx.docks.layout;
+
+import javafx.beans.property.ObjectProperty;
+import javafx.geometry.Orientation;
+import javafx.scene.Node;
+import org.metalib.papifly.fx.docking.api.ContentFactory;
+import org.metalib.papifly.fx.docking.api.ContentStateAdapter;
+import org.metalib.papifly.fx.docking.api.LeafContentData;
+import org.metalib.papifly.fx.docking.api.Theme;
+import org.metalib.papifly.fx.docks.core.DockData;
+import org.metalib.papifly.fx.docks.core.DockElement;
+import org.metalib.papifly.fx.docks.core.DockLeaf;
+import org.metalib.papifly.fx.docks.core.DockSplitGroup;
+import org.metalib.papifly.fx.docks.core.DockTabGroup;
+import org.metalib.papifly.fx.docks.layout.data.LayoutNode;
+import org.metalib.papifly.fx.docks.layout.data.LayoutNodeVisitor;
+import org.metalib.papifly.fx.docks.layout.data.LeafData;
+import org.metalib.papifly.fx.docks.layout.data.SplitData;
+import org.metalib.papifly.fx.docks.layout.data.TabGroupData;
+
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * Factory for building DockElement trees from layout DTOs.
+ * Recursively traverses the data model to instantiate concrete structural nodes.
+ */
+public class LayoutFactory {
+
+    private static final Logger LOG = Logger.getLogger(LayoutFactory.class.getName());
+
+    private final ObjectProperty<Theme> themeProperty;
+    private ContentFactory contentFactory;
+    private ContentStateRegistry contentStateRegistry;
+    private PlaceholderFactory placeholderFactory;
+
+    /**
+     * Creates a LayoutFactory with the given theme property and content factory.
+     *
+     * @param themeProperty theme property used for created UI elements
+     * @param contentFactory content factory used for content restoration
+     */
+    public LayoutFactory(ObjectProperty<Theme> themeProperty, ContentFactory contentFactory) {
+        this(themeProperty, contentFactory, new DefaultPlaceholderFactory());
+    }
+
+    /**
+     * Creates a LayoutFactory with explicit placeholder creation.
+     *
+     * @param themeProperty theme property used for created UI elements
+     * @param contentFactory content factory used for content restoration
+     * @param placeholderFactory placeholder factory used when content cannot be restored
+     */
+    public LayoutFactory(
+        ObjectProperty<Theme> themeProperty,
+        ContentFactory contentFactory,
+        PlaceholderFactory placeholderFactory
+    ) {
+        this.themeProperty = themeProperty;
+        this.contentFactory = contentFactory;
+        this.contentStateRegistry = ContentStateRegistry.fromServiceLoader();
+        this.placeholderFactory = placeholderFactory;
+    }
+
+    /**
+     * Creates a LayoutFactory with no content factory (content must be set manually).
+     *
+     * @param themeProperty theme property used for created UI elements
+     */
+    public LayoutFactory(ObjectProperty<Theme> themeProperty) {
+        this(themeProperty, null);
+    }
+
+    /**
+     * Updates the content factory used to recreate leaf contents during restore.
+     *
+     * @param contentFactory content factory used for content restoration
+     */
+    public void setContentFactory(ContentFactory contentFactory) {
+        this.contentFactory = contentFactory;
+    }
+
+    /**
+     * Updates the content state registry used to restore content.
+     *
+     * @param contentStateRegistry content state registry
+     */
+    public void setContentStateRegistry(ContentStateRegistry contentStateRegistry) {
+        this.contentStateRegistry = contentStateRegistry;
+    }
+
+    /**
+     * Updates the placeholder factory used when layout content cannot be restored.
+     *
+     * @param placeholderFactory placeholder factory
+     */
+    public void setPlaceholderFactory(PlaceholderFactory placeholderFactory) {
+        this.placeholderFactory = placeholderFactory;
+    }
+
+    /**
+     * Gets the content state registry used to restore content.
+     *
+     * @return content state registry
+     */
+    public ContentStateRegistry getContentStateRegistry() {
+        return contentStateRegistry;
+    }
+
+    /**
+     * Builds a DockElement tree from the given layout node.
+     *
+     * @param node layout node to build
+     * @return constructed dock element tree
+     */
+    public DockElement build(LayoutNode node) {
+        if (node == null) {
+            return null;
+        }
+        return node.accept(new LayoutNodeVisitor<>() {
+            @Override
+            public DockElement visitLeaf(LeafData leaf) {
+                return buildSingleTabGroup(leaf);
+            }
+
+            @Override
+            public DockElement visitSplit(SplitData split) {
+                return buildSplit(split);
+            }
+
+            @Override
+            public DockElement visitTabGroup(TabGroupData tabGroup) {
+                return buildTabGroup(tabGroup);
+            }
+        });
+    }
+
+    /**
+     * Builds a DockLeaf from LeafData.
+     * Public access for session restoration.
+     *
+     * @param data serialized leaf data
+     * @return reconstructed dock leaf
+     */
+    public DockLeaf buildLeaf(LeafData data) {
+        DockData metadata = DockData.of(data.id(), data.title());
+        DockLeaf leaf = new DockLeaf(metadata);
+        leaf.setContentFactoryId(data.contentFactoryId());
+        LeafContentData contentData = normalizeContentData(data);
+        leaf.setContentData(contentData);
+
+        Node content = null;
+        if (contentData != null && contentStateRegistry != null) {
+            ContentStateAdapter adapter = contentStateRegistry.getAdapter(contentData.typeKey());
+            if (adapter != null) {
+                try {
+                    content = adapter.restore(contentData);
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Adapter restore failed for typeKey=" + contentData.typeKey()
+                        + ", falling through to factory/placeholder", e);
+                    // content remains null -> factory fallback below
+                }
+            }
+            // When adapter is absent, fall through to factory attempt below
+        }
+
+        // Create content if factory is available
+        if (content == null && contentFactory != null && data.contentFactoryId() != null) {
+            content = contentFactory.create(data.contentFactoryId());
+        }
+
+        // Placeholder only after both adapter and factory attempts fail
+        if (content == null) {
+            content = placeholderFactory.createPlaceholder(data, contentData);
+        }
+
+        if (content != null) {
+            leaf.content(content);
+        }
+
+        return leaf;
+    }
+
+    private LeafContentData normalizeContentData(LeafData data) {
+        LeafContentData contentData = data.content();
+        if (contentData == null) {
+            return null;
+        }
+        if (contentData.typeKey() == null && data.contentFactoryId() != null) {
+            return new LeafContentData(
+                data.contentFactoryId(),
+                contentData.contentId(),
+                contentData.version(),
+                contentData.state()
+            );
+        }
+        return contentData;
+    }
+
+    private DockTabGroup buildSingleTabGroup(LeafData data) {
+        DockTabGroup tabGroup = new DockTabGroup(themeProperty);
+        tabGroup.addLeaf(buildLeaf(data));
+        return tabGroup;
+    }
+
+    private DockSplitGroup buildSplit(SplitData data) {
+        DockSplitGroup split = new DockSplitGroup(
+            data.id(),
+            data.orientation(),
+            data.dividerPosition(),
+            themeProperty
+        );
+
+        if (data.first() != null) {
+            split.setFirst(build(data.first()));
+        }
+        if (data.second() != null) {
+            split.setSecond(build(data.second()));
+        }
+
+        return split;
+    }
+
+    private DockTabGroup buildTabGroup(TabGroupData data) {
+        DockTabGroup tabGroup = new DockTabGroup(data.id(), themeProperty);
+
+        for (LeafData leafData : data.tabs()) {
+            DockLeaf leaf = buildLeaf(leafData);
+            tabGroup.addLeaf(leaf);
+        }
+
+        if (data.activeTabIndex() >= 0 && data.activeTabIndex() < data.tabs().size()) {
+            tabGroup.setActiveTab(data.activeTabIndex());
+        }
+
+        return tabGroup;
+    }
+
+    /**
+     * Creates a simple leaf with title and content.
+     *
+     * @param title leaf title
+     * @param content content node
+     * @return created leaf
+     */
+    public DockLeaf createLeaf(String title, Node content) {
+        return new DockLeaf()
+            .withTitle(title)
+            .content(content);
+    }
+
+    /**
+     * Creates a horizontal split group.
+     *
+     * @param first first child element
+     * @param second second child element
+     * @return horizontal split group
+     */
+    public DockSplitGroup createHorizontalSplit(DockElement first, DockElement second) {
+        return createHorizontalSplit(first, second, 0.5);
+    }
+
+    /**
+     * Creates a horizontal split group with custom divider position.
+     *
+     * @param first first child element
+     * @param second second child element
+     * @param dividerPosition divider position ratio
+     * @return horizontal split group
+     */
+    public DockSplitGroup createHorizontalSplit(DockElement first, DockElement second, double dividerPosition) {
+        DockSplitGroup split = new DockSplitGroup(Orientation.HORIZONTAL, themeProperty);
+        split.setDividerPosition(dividerPosition);
+        split.setFirst(first);
+        split.setSecond(second);
+        return split;
+    }
+
+    /**
+     * Creates a vertical split group.
+     *
+     * @param first first child element
+     * @param second second child element
+     * @return vertical split group
+     */
+    public DockSplitGroup createVerticalSplit(DockElement first, DockElement second) {
+        return createVerticalSplit(first, second, 0.5);
+    }
+
+    /**
+     * Creates a vertical split group with custom divider position.
+     *
+     * @param first first child element
+     * @param second second child element
+     * @param dividerPosition divider position ratio
+     * @return vertical split group
+     */
+    public DockSplitGroup createVerticalSplit(DockElement first, DockElement second, double dividerPosition) {
+        DockSplitGroup split = new DockSplitGroup(Orientation.VERTICAL, themeProperty);
+        split.setDividerPosition(dividerPosition);
+        split.setFirst(first);
+        split.setSecond(second);
+        return split;
+    }
+
+    /**
+     * Creates a tab group with the given leaves.
+     *
+     * @param leaves leaves to add to the created tab group
+     * @return created tab group
+     */
+    public DockTabGroup createTabGroup(DockLeaf... leaves) {
+        DockTabGroup tabGroup = new DockTabGroup(themeProperty);
+        for (DockLeaf leaf : leaves) {
+            tabGroup.addLeaf(leaf);
+        }
+        return tabGroup;
+    }
+}
