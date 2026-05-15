@@ -4,8 +4,7 @@
     <parent>
         <groupId>org.metalib.papifly.docking</groupId>
         <artifactId>papiflyfx-build-parent</artifactId>
-        <version>0.0.25-SNAPSHOT</version>
-        <relativePath />
+        <version>0.0.25</version>
     </parent>
     <artifactId>papiflyfx-docking-core</artifactId>
     <packaging>pom</packaging>
@@ -16,4 +15,10 @@
         <module>papiflyfx-docking-api</module>
         <module>papiflyfx-docking-docks</module>
     </modules>
+    <scm>
+        <connection>scm:git:git://github.com/org-metalib/papiflyfx-docking-core.git</connection>
+        <developerConnection>scm:git:https://github.com/org-metalib/papiflyfx-docking-core.git</developerConnection>
+        <url>https://github.com/org-metalib/papiflyfx-docking-core</url>
+        <tag>HEAD</tag>
+    </scm>
 </project>
